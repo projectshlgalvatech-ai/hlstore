@@ -1317,6 +1317,11 @@ async function saveEditMaterial(id){
     (DB.siteInstallMaterial||[]).forEach(entry=>{
       (entry.materials||[]).forEach(line=>{ if(line.materialId===id){ line.materialName = name; touchedKeys.add('siteInstallMaterial'); } });
     });
+    (DB.soList||[]).forEach(so=>{
+      (so.products||[]).forEach(p=>{
+        (p.materials||[]).forEach(line=>{ if(line.materialId===id){ line.materialName = name; touchedKeys.add('soList'); } });
+      });
+    });
   }
   for(const key of touchedKeys) await saveKey(key);
   closeModal();

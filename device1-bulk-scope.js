@@ -181,6 +181,159 @@ async function bulkImportMaterialsFromExcel(fileInputEl){
 }
 window.bulkImportMaterialsFromExcel = bulkImportMaterialsFromExcel;
 
+/* ---------------- Bulk import MULTIPLE materials into one SO/Projects product from an
+   uploaded Excel file (Device 1). Same idea as the Materials-section import above, just
+   aimed at a single product's material list: instead of submitting the "+ Add material"
+   form once per line (which gets old fast with 10-20 materials under one product), fill
+   a sheet and upload it. Existing materials are matched by name (using size/grade from
+   the sheet to pick the right variant when a name has several); anything genuinely new
+   is created via the same path the manual form uses, then attached — no separate trip
+   to Materials needed. */
+const SO_MATERIAL_IMPORT_FIELD_ALIASES = {
+  name: ['material name','name','material'],
+  qty: ['qty needed','qty','quantity','quantity needed','needed'],
+  size: ['size','size/dimension','size / dimension','dimension'],
+  grade: ['grade','grade / quality','grade/quality','quality'],
+  category: ['category','material category']
+};
+async function downloadSOMaterialImportTemplate(){
+  if(typeof ExcelJS==='undefined'){ toast('Could not build template — check your internet connection', true); return; }
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'HL Galvatech'; wb.created = new Date();
+  const instr = wb.addWorksheet('Instructions');
+  instr.getColumn(1).width = 92;
+  [
+    ['HL Galvatech — SO / Projects Material Import Template'],
+    [],
+    ['How to use this file:'],
+    ['1. Open the "Materials" tab.'],
+    ['2. Row 2 is an example — replace it with your own first material, or delete it.'],
+    ['3. Add one row per material needed under this product. "Material Name" and "Qty Needed" are the only required columns.'],
+    ["4. If the material already exists in the system, its name alone is enough — leave Size/Grade/Category blank."],
+    ['5. If the material is new, fill in Size / Grade / Category if you have them — it will be created automatically and attached to the product in the same step. Leave them blank and it will still be created with sensible defaults.'],
+    ['6. Category should be one of MS, SS, Plastic, Rubber, or Other — leave blank to default to Other.'],
+    ['7. Save the file, then in the app open the product under its SO and use "Upload Excel file" next to "+ Add material".']
+  ].forEach(r=>instr.addRow(r));
+  instr.getCell('A1').font = {bold:true, size:14};
+  const mat = wb.addWorksheet('Materials');
+  const headers = ['Material Name','Qty Needed','Size','Grade','Category'];
+  mat.addRow(headers).font = {bold:true};
+  mat.addRow(['MS HR Sheet', 10, '4 x 1500 x 3000 mm','IS 2062 E250','MS']);
+  mat.columns.forEach(c=>c.width=22);
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'HL_Galvatech_SO_Material_Import_Template.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+window.downloadSOMaterialImportTemplate = downloadSOMaterialImportTemplate;
+
+async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
+  const file = fileInputEl.files && fileInputEl.files[0];
+  if(!file) return;
+  if(typeof ExcelJS==='undefined'){ toast('Could not read file — ExcelJS did not load. Check your internet connection.', true); fileInputEl.value=''; return; }
+  const so = findSO(soId);
+  const product = so && so.products.find(p=>p.id===productId);
+  if(!so || !product){ toast('Could not find that product to import into', true); fileInputEl.value=''; return; }
+  if(so.status==='completed'){ toast(`SO ${so.soNumber} is marked Complete by Device 3 — no new material can be added.`, true); fileInputEl.value=''; return; }
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    let sheet = wb.worksheets.find(s=>normalizeHeaderText(s.name)==='materials')
+      || wb.worksheets.find(s=>normalizeHeaderText(s.name)!=='instructions')
+      || wb.worksheets[0];
+    if(!sheet){ toast('No sheet found in that file', true); fileInputEl.value=''; return; }
+
+    const headerRow = sheet.getRow(1);
+    const colOf = {};
+    headerRow.eachCell({includeEmpty:false}, (cell, colNumber)=>{
+      const h = normalizeHeaderText(cell.value);
+      for(const field in SO_MATERIAL_IMPORT_FIELD_ALIASES){
+        if(colOf[field]) continue;
+        if(SO_MATERIAL_IMPORT_FIELD_ALIASES[field].includes(h)) colOf[field] = colNumber;
+      }
+    });
+    if(!colOf.name){ toast('Could not find a "Material Name" column in that file', true); fileInputEl.value=''; return; }
+    if(!colOf.qty){ toast('Could not find a "Qty Needed" column in that file', true); fileInputEl.value=''; return; }
+    const cellText = (row, col)=> col ? String(row.getCell(col).value==null?'':row.getCell(col).value).trim() : '';
+
+    // ExcelJS row iteration is synchronous, but resolving/creating materials is async
+    // (createMaterialFromDraft awaits a save) — collect the raw rows first, then process
+    // them one at a time below so each row's material exists before the next is checked.
+    const rows = [];
+    sheet.eachRow({includeEmpty:false}, (row, rowNumber)=>{
+      if(rowNumber===1) return; // header
+      rows.push({
+        name: cellText(row, colOf.name),
+        qty: Number(cellText(row, colOf.qty)||0),
+        size: cellText(row, colOf.size),
+        grade: cellText(row, colOf.grade),
+        category: cellText(row, colOf.category)
+      });
+    });
+
+    let added=0, skippedNoName=0, skippedNoQty=0, skippedDupOnProduct=0, skippedAmbiguous=0, createdNew=0;
+    const ambiguousNames = [], newlyCreated = [];
+
+    for(const r of rows){
+      if(!r.name){ skippedNoName++; continue; }
+      if(!r.qty || r.qty<=0){ skippedNoQty++; continue; }
+      const nameMatches = DB.materials.filter(m=>m.name.toLowerCase()===r.name.toLowerCase());
+      let mat = null;
+      if(nameMatches.length===1){
+        mat = nameMatches[0];
+      } else if(nameMatches.length>1){
+        // Several variants share this name — only proceed automatically if the sheet's
+        // Size/Grade pin down exactly one of them; otherwise this row needs a manual pick.
+        const exact = nameMatches.find(m=>(m.size||'').toLowerCase()===r.size.toLowerCase() && (m.grade||'').toLowerCase()===r.grade.toLowerCase());
+        if(exact){ mat = exact; } else { skippedAmbiguous++; ambiguousNames.push(r.name); continue; }
+      }
+      if(!mat){
+        // No existing material by this name at all — create it, same as the manual
+        // "new material" path in the add-material form, then use it immediately.
+        const category = r.category || 'Other';
+        const categoryIsOther = !SO_MATERIAL_CATEGORIES.includes(category);
+        const draft = { name: r.name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size: r.size, grade: r.grade, price:0, unit:'pcs', rack:'', trackNos:true };
+        const created = await createMaterialFromDraft(draft);
+        if(created==='duplicate' || !created){ skippedAmbiguous++; ambiguousNames.push(r.name); continue; }
+        mat = created; createdNew++; newlyCreated.push(mat.name);
+      }
+      if(product.materials.some(x=>x.materialId===mat.id)){ skippedDupOnProduct++; continue; }
+      product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:r.qty, qtyFulfilled:0});
+      added++;
+    }
+
+    if(!added && !skippedDupOnProduct && !skippedAmbiguous && !skippedNoName && !skippedNoQty){
+      toast('No material rows found in that file', true); fileInputEl.value=''; return;
+    }
+
+    checkSOCompletion(so);
+    await saveKey('soList'); await saveKey('materials');
+
+    fileInputEl.value = '';
+    showModal(`
+      <h3>Import complete — ${product.name}</h3>
+      <div class="row" style="flex-direction:column;gap:6px;margin:10px 0">
+        <div><b>${added}</b> material line${added===1?'':'s'} added to "${product.name}"</div>
+        ${createdNew?`<div>${createdNew} new material${createdNew===1?'':'s'} created in the master list: ${newlyCreated.join(', ')}</div>`:''}
+        ${skippedDupOnProduct?`<div>${skippedDupOnProduct} row${skippedDupOnProduct===1?'':'s'} skipped — already listed on this product</div>`:''}
+        ${skippedAmbiguous?`<div class="status-low">${skippedAmbiguous} row${skippedAmbiguous===1?'':'s'} skipped — name matches several variants already in the system and Size/Grade didn't pin one down: ${ambiguousNames.join(', ')}. Add these manually and pick the exact one.</div>`:''}
+        ${skippedNoName?`<div>${skippedNoName} row${skippedNoName===1?'':'s'} skipped — no material name</div>`:''}
+        ${skippedNoQty?`<div>${skippedNoQty} row${skippedNoQty===1?'':'s'} skipped — no valid Qty Needed</div>`:''}
+      </div>
+      <div class="modal-actions"><button class="btn" type="button" onclick="closeModal()">Done</button></div>
+    `);
+    render();
+  }catch(e){
+    console.error('SO material import failed', e);
+    toast('Could not read that file — make sure it is a valid .xlsx file', true);
+    fileInputEl.value = '';
+  }
+}
+window.bulkImportSOMaterialsFromExcel = bulkImportSOMaterialsFromExcel;
+
 /* ---------------- shared collapsible-panel helper — wraps a panel's list
    content behind a click-to-open header, collapsed by default. Used by
    Factory Use, Material Request, Customers & Suppliers and Categories &

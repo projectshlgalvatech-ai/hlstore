@@ -135,7 +135,7 @@ function soCategorySelectHTML(id){
    text `size` field used everywhere else in the app. */
 function sizePickerHTML(prefix, label){
   return `
-    <div class="field"><label>${label||'Size'} — value</label><input id="${prefix}-value" type="number" step="any" min="0" placeholder="e.g. 10"></div>
+    <div class="field"><label>${label||'Size'} — value</label><input id="${prefix}-value" type="text" placeholder="e.g. 10 or 10x20"></div>
     <div class="field"><label>${label||'Size'} — unit</label><select id="${prefix}-unit">${SIZE_UNITS.map(u=>`<option value="${u}">${u}</option>`).join('')}</select></div>
     <div class="field" id="${prefix}-other-wrap" style="display:none"><label>Unit — specify</label><input id="${prefix}-other-unit" placeholder="e.g. sq.ft"></div>`;
 }

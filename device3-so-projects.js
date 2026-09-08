@@ -195,19 +195,19 @@ function productBlockHTML(so, p, editable){
     <div style="display:flex;justify-content:space-between;align-items:center">
       <b>${p.name}</b> ${p.status==='completed'?'<span class="status-ok">Completed</span>':'<span class="status-low">Open</span>'}
     </div>
-    ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Size / Grade</th><th>Needed</th><th>Received</th><th>Remaining</th>${editable?'<th></th>':''}</tr></thead><tbody>
+    ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Size</th><th>Grade</th><th>Needed</th><th>Received</th><th>Remaining</th>${editable?'<th></th>':''}</tr></thead><tbody>
       ${p.materials.map(r=>{
         const remaining = Math.max(0, r.qtyNeeded-r.qtyFulfilled);
         const excessAvail = DB.excessPool[r.materialId]||0;
         const canApply = Math.min(remaining, excessAvail);
         const mat = materialById(r.materialId);
-        const specText = mat ? [mat.size, mat.grade].filter(Boolean).join(' · ') || '—' : '—';
         const otherAvail = so.priority ? otherSOAvailable(so.id, r.materialId) : 0;
         const canPull = Math.min(remaining, otherAvail);
-        return `<tr><td>${r.materialName}</td><td>${specText}</td><td>${r.qtyNeeded}</td><td>${r.qtyFulfilled}</td>
+        return `<tr><td>${r.materialName}</td><td>${mat && mat.size ? mat.size : '—'}</td><td>${mat && mat.grade ? mat.grade : '—'}</td><td>${r.qtyNeeded}</td><td>${r.qtyFulfilled}</td>
         <td class="${remaining>0?'status-low':'status-ok'}">${remaining}</td>
         ${editable? `<td>${canApply>0? `<button class="btn small secondary" onclick="useExcess('${so.id}','${p.id}','${r.materialId}', ${canApply})">Apply excess (${canApply})</button>` : ''}
         ${canPull>0? `<button class="btn small secondary" onclick="pullFromOtherSO('${so.id}','${p.id}','${r.materialId}', ${canPull})" title="Reassign already-received stock from a non-priority SO to this priority SO">Pull from other SO (${canPull})</button>` : ''}
+        <button class="btn small secondary" onclick="editMaterialModal('${r.materialId}')" title="Fix a mistake in this material's name, size, grade, etc. — works even after the SO is saved">Edit</button>
         ${canEdit? `<button class="btn small danger" onclick="removeSOMaterial('${so.id}','${p.id}','${r.id}')">Remove</button>`:''}</td>`:''}</tr>`;
       }).join('')}
     </tbody></table>` : `<div class="empty">No materials listed for this product yet.</div>`}
@@ -222,8 +222,49 @@ function productBlockHTML(so, p, editable){
       </div>
       <div class="field existing-mat-summary" style="display:none;flex:1 1 100%"></div>
       <button class="btn small secondary" type="submit">+ Add material</button>
-    </form>` : (editable && so.status==='completed' ? `<div class="hint">SO marked Complete by Device 3 — no new material can be added. Device 3 must mark it Incomplete first.</div>`
+    </form>
+    <div class="row" style="margin-top:6px;gap:8px;align-items:center">
+      <span class="hint">Adding several materials to this product? Skip the form above:</span>
+      <button type="button" class="btn small secondary" onclick="downloadSOMaterialImportTemplate()">Download Excel template</button>
+      <input type="file" id="so-mat-import-${so.id}-${p.id}" accept=".xlsx,.xls" style="display:none" onchange="bulkImportSOMaterialsFromExcel(this,'${so.id}','${p.id}')">
+      <button type="button" class="btn small secondary" onclick="document.getElementById('so-mat-import-${so.id}-${p.id}').click()">Upload Excel file</button>
+    </div>` : (editable && so.status==='completed' ? `<div class="hint">SO marked Complete by Device 3 — no new material can be added. Device 3 must mark it Incomplete first.</div>`
       : (editable && so.locked ? `<div class="hint">SO saved — hit Edit above to add more materials.</div>` : ''))}
+  </div>`;
+}
+// "Add material to multiple products" — lets Device 1 add one material (existing or
+// brand-new) to several/all of an SO's products in a single submit, instead of
+// repeating the per-product form once for each of the (often 10+) product names.
+// New materials typed here are created and attached in the same step (see the
+// submit handler in paintSOList) — no detour through Materials and no re-entry.
+function bulkAddMaterialFormHTML(so){
+  const openProducts = so.products.filter(p=>p.status!=='completed');
+  if(so.products.length<2) return ''; // not worth it with a single product — the per-product form below covers that
+  return `
+  <div style="border:1px dashed var(--line);border-radius:3px;padding:10px 12px;margin:10px 0;background:var(--bg-sunk)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <b>Add material to multiple products</b>
+      <span class="hint">Same material + qty applied to every product you check — one entry instead of ${so.products.length}.</span>
+    </div>
+    <form class="row bulk-material-form" data-so="${so.id}" style="margin-top:8px">
+      <div class="field" style="position:relative"><input required class="bulk-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist bulk-mat-list"></div><div class="hint bulk-mat-hint"></div></div>
+      <div class="field"><input required type="number" min="1" class="bulk-mat-qty" placeholder="Qty needed (each)"></div>
+      <div class="bulk-mat-fields" style="display:contents">
+        ${sizePickerHTML('bulk-size-'+so.id,'Size')}
+        <div class="field"><input class="bulk-mat-grade" placeholder="Grade / Quality (optional)"></div>
+        <div class="field"><label style="display:block">Category</label>${soCategorySelectHTML('bulk-cat-'+so.id)}</div>
+        <div class="field bulk-mat-cat-other-wrap" id="bulk-cat-other-wrap-${so.id}" style="display:none"><input id="bulk-cat-other-${so.id}" class="bulk-mat-cat-other" placeholder="Specify category"></div>
+      </div>
+      <div class="field bulk-existing-mat-summary" style="display:none;flex:1 1 100%"></div>
+      <div class="field" style="flex:1 1 100%">
+        <label style="display:block">Apply to products</label>
+        <div style="display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center">
+          <label style="font-weight:600"><input type="checkbox" class="bulk-mat-select-all"> Select all (${openProducts.length})</label>
+          ${so.products.map(p=>`<label${p.status==='completed'?' title="Completed — no new material can be added" style="opacity:.55"':''}><input type="checkbox" class="bulk-mat-product-check" value="${p.id}" ${p.status==='completed'?'disabled':''}> ${p.name}${p.status==='completed'?' (completed)':''}</label>`).join('')}
+        </div>
+      </div>
+      <button class="btn small secondary" type="submit">+ Add to selected products</button>
+    </form>
   </div>`;
 }
 // Which SOs are currently open in "Edit details" mode (Device 1 only) — runtime-only,
@@ -342,6 +383,7 @@ function paintSOList(editable){
                       ${DEVICE===3? `<button type="button" class="btn small ${so.status==='completed'?'secondary':''}" onclick="toggleSOManualStatus('${so.id}')">${so.status==='completed'? 'Mark Incomplete' : 'Mark Complete'}</button>` : ''}
                     </div>` : ''}
                     ${soEditing.has(so.id) ? soEditFormHTML(so) : `
+                    ${editable && !so.locked && so.status!=='completed'? bulkAddMaterialFormHTML(so) : ''}
                     ${so.products.length? so.products.map(p=>productBlockHTML(so,p,editable)).join('') : `<div class="empty">No products added yet.</div>`}
                     ${editable && !so.locked && so.status!=='completed'? `<form class="row add-product-form" data-so="${so.id}" style="margin-top:8px">
                       <div class="field"><input required placeholder="Product name, e.g. Pen" class="new-product-name"></div>
@@ -407,6 +449,54 @@ function paintSOList(editable){
     if(catSel && catOtherWrap){ catSel.addEventListener('change', ()=>{ catOtherWrap.style.display = catSel.value==='Other' ? 'flex' : 'none'; }); }
   });
 
+  // Bulk "add material to multiple products" form — same autocomplete/new-material-detection
+  // behavior as the per-product form above, just scoped to its own field classes so it doesn't
+  // interfere with the per-product forms sitting alongside it.
+  const showBulkNewFields = (form, show)=>{
+    const fieldsWrap = form.querySelector('.bulk-mat-fields');
+    const summary = form.querySelector('.bulk-existing-mat-summary');
+    if(fieldsWrap) fieldsWrap.style.display = show ? 'contents' : 'none';
+    if(summary) summary.style.display = show ? 'none' : '';
+  };
+  const applyBulkExistingPick = (inp, m, hintEl, form)=>{
+    pickedByInput.set(inp, m); inp.value = m.name;
+    if(hintEl) hintEl.textContent = '';
+    showBulkNewFields(form, false);
+    const summary = form.querySelector('.bulk-existing-mat-summary');
+    if(summary){
+      summary.innerHTML = `<span class="hint">Using existing material — Type: ${m.type} · Category: ${m.category}${m.size?' · Size: '+m_escape(m.size):''}${m.grade?' · Grade: '+m_escape(m.grade):''}${m.rack?' · Rack: '+m_escape(m.rack):''}. Just enter the Qty needed and pick products below.</span>`;
+    }
+  };
+  wrap.querySelectorAll('.bulk-material-form').forEach(f=>{
+    const soId = f.dataset.so;
+    wireSizePicker('bulk-size-'+soId);
+    const catSel = document.getElementById('bulk-cat-'+soId);
+    const catOtherWrap = document.getElementById('bulk-cat-other-wrap-'+soId);
+    if(catSel && catOtherWrap){ catSel.addEventListener('change', ()=>{ catOtherWrap.style.display = catSel.value==='Other' ? 'flex' : 'none'; }); }
+    const selectAll = f.querySelector('.bulk-mat-select-all');
+    const productChecks = ()=>Array.from(f.querySelectorAll('.bulk-mat-product-check'));
+    if(selectAll){
+      selectAll.addEventListener('change', ()=>{ productChecks().forEach(c=>{ if(!c.disabled) c.checked = selectAll.checked; }); });
+    }
+    const inp = f.querySelector('.bulk-mat-name');
+    const listEl = f.querySelector('.bulk-mat-list');
+    const hintEl = f.querySelector('.bulk-mat-hint');
+    attachAutocomplete(inp, listEl, ()=>DB.materials, (m)=>applyBulkExistingPick(inp, m, hintEl, f),
+      (m)=>`${m.type} · ${m.category}${m.size?' · '+m.size:''}${m.grade?' · '+m.grade:''}`);
+    inp.addEventListener('input', ()=>{
+      if(inp.value !== (pickedByInput.get(inp)||{}).name){
+        pickedByInput.delete(inp);
+        const matches = DB.materials.filter(m=>m.name.toLowerCase()===inp.value.trim().toLowerCase());
+        if(matches.length===1){
+          applyBulkExistingPick(inp, matches[0], hintEl, f);
+        } else {
+          showBulkNewFields(f, true);
+          if(hintEl) hintEl.textContent = matches.length>1 ? `${matches.length} variants of this name — pick one from the list below.` : '';
+        }
+      }
+    });
+  });
+
   if(editable){
     wrap.querySelectorAll('.add-product-form').forEach(f=>{
       f.addEventListener('submit', async e=>{
@@ -460,6 +550,61 @@ function paintSOList(editable){
         product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyFulfilled:0});
         checkSOCompletion(so);
         await saveKey('soList'); await saveKey('materials'); toast(`${mat.name} added to ${product.name}`); render();
+      });
+    });
+    wrap.querySelectorAll('.bulk-material-form').forEach(f=>{
+      f.addEventListener('submit', async e=>{
+        e.preventDefault();
+        const soId = f.dataset.so;
+        const so = findSO(soId); if(!so) return;
+        if(so.status==='completed'){ toast(`SO ${so.soNumber} is marked Complete by Device 3 — no new material can be added.`, true); return; }
+        const checkedIds = Array.from(f.querySelectorAll('.bulk-mat-product-check')).filter(c=>c.checked && !c.disabled).map(c=>c.value);
+        if(!checkedIds.length){ toast('Select at least one product to add this material to', true); return; }
+        const nameInput = f.querySelector('.bulk-mat-name');
+        const qtyInput = f.querySelector('.bulk-mat-qty');
+        const qty = Number(qtyInput.value);
+        if(!qty || qty<=0){ toast('Enter a quantity needed', true); return; }
+        let mat = pickedByInput.get(nameInput);
+        if(!mat){
+          const matches = DB.materials.filter(m=>m.name.toLowerCase()===nameInput.value.trim().toLowerCase());
+          if(matches.length>1){ toast('That name matches several variants (size/grade) — pick the exact one from the dropdown', true); return; }
+          mat = matches[0];
+        }
+        if(!mat){
+          // Brand-new material — create it right here from the Size/Grade/Category fields on
+          // this form and use it immediately below. No detour to Materials, no re-typing it.
+          const name = nameInput.value.trim();
+          if(!name){ toast('Enter a material name', true); return; }
+          const size = readSizeValue('bulk-size-'+soId);
+          const grade = (f.querySelector('.bulk-mat-grade').value||'').trim();
+          const catSel = document.getElementById('bulk-cat-'+soId);
+          let category = catSel ? catSel.value : 'Other';
+          let categoryIsOther = category==='Other';
+          if(categoryIsOther){
+            const otherVal = (document.getElementById('bulk-cat-other-'+soId)?.value||'').trim();
+            if(otherVal) category = otherVal;
+          }
+          const draft = { name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size, grade, price:0, unit:'pcs', rack:'', trackNos:true };
+          const created = await createMaterialFromDraft(draft);
+          if(created==='duplicate'){ toast(`That exact material "${name}" already exists — pick it from the list instead.`, true); return; }
+          if(!created){ toast(`Could not create "${name}" — pick an existing material from the list, or fill in a Category.`, true); return; }
+          mat = created;
+        }
+        let addedCount = 0; const skipped = [];
+        checkedIds.forEach(pid=>{
+          const product = so.products.find(p=>p.id===pid); if(!product) return;
+          if(product.materials.some(r=>r.materialId===mat.id)){ skipped.push(product.name); return; }
+          product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyFulfilled:0});
+          addedCount++;
+        });
+        checkSOCompletion(so);
+        await saveKey('soList'); await saveKey('materials');
+        if(addedCount){
+          toast(`${mat.name} added to ${addedCount} product${addedCount>1?'s':''}${skipped.length? ' (already listed, skipped: '+skipped.join(', ')+')':''}`);
+        } else {
+          toast(`${mat.name} was already listed on every product you selected`, true);
+        }
+        render();
       });
     });
   }
