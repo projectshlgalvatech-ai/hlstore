@@ -25,6 +25,15 @@ const MATERIAL_IMPORT_FIELD_ALIASES = {
   productCode: ['product code','product no','product no.','product number','code']
 };
 function normalizeHeaderText(v){ return String(v==null?'':v).trim().toLowerCase(); }
+// Pulls the first number out of a cell's text even if it's mixed with letters
+// or units — "100abc" -> 100, "10 Nos" -> 10, "abc" -> NaN. Used for any
+// numeric import column (Qty Needed, Price, Opening Stock) so a stray letter
+// or unit typed into a quantity cell doesn't silently drop the whole row —
+// only a cell with no number in it at all is treated as invalid.
+function extractLeadingNumber(text){
+  const m = String(text==null?'':text).match(/-?\d+(\.\d+)?/);
+  return m ? Number(m[0]) : NaN;
+}
 function inferMaterialTypeFromText(text){
   const t = (text||'').toLowerCase();
   if(/\bss\b|stainless/.test(t)) return 'SS';
@@ -118,11 +127,11 @@ async function bulkImportMaterialsFromExcel(fileInputEl){
         newCategories.push(category);
       }
       const priceRaw = cellText(row, colOf.price);
-      const price = Number(priceRaw||0) || 0;
+      const price = extractLeadingNumber(priceRaw) || 0;
       if(!priceRaw) zeroPrice++;
       const unitRaw = cellText(row, colOf.unit).toLowerCase();
       const unit = UNITS.includes(unitRaw) ? unitRaw : 'pcs';
-      const opening = Number(cellText(row, colOf.opening)||0) || 0;
+      const opening = extractLeadingNumber(cellText(row, colOf.opening)) || 0;
       // Product Code must stay unique across the whole materials list to be
       // useful for tracking — a row whose code collides with one already in
       // the system, or with an earlier row in this same file, still gets
@@ -397,7 +406,7 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
       if(rowNumber===1) return; // header
       rows.push({
         name: cellText(row, colOf.name),
-        qty: Number(cellText(row, colOf.qty)||0),
+        qty: extractLeadingNumber(cellText(row, colOf.qty)),
         size: cellText(row, colOf.size),
         grade: cellText(row, colOf.grade),
         category: cellText(row, colOf.category)
