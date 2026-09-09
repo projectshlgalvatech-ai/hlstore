@@ -404,8 +404,16 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
       });
     });
 
-    let added=0, skippedNoName=0, skippedNoQty=0, skippedDupOnProduct=0, skippedAmbiguous=0, createdNew=0;
-    const ambiguousNames = [], newlyCreated = [];
+    let added=0, skippedNoName=0, skippedNoQty=0, skippedDupOnProduct=0, createdNew=0;
+    const newlyCreated = [];
+    // Loose text match for Size/Grade — trims, collapses internal whitespace and
+    // lowercases, so "10 Liter" and "10  liter" line up; a second, tighter pass
+    // also strips all whitespace so "10ltr" lines up with "10 ltr". This is only
+    // used to recognise an existing variant that's really the same thing typed
+    // slightly differently — it never invents a match between genuinely
+    // different sizes.
+    const normSG = s=>String(s||'').toLowerCase().replace(/\s+/g,' ').trim();
+    const tightSG = s=>normSG(s).replace(/\s+/g,'');
 
     for(const r of rows){
       if(!r.name){ skippedNoName++; continue; }
@@ -415,27 +423,40 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
       if(nameMatches.length===1){
         mat = nameMatches[0];
       } else if(nameMatches.length>1){
-        // Several variants share this name — only proceed automatically if the sheet's
-        // Size/Grade pin down exactly one of them; otherwise this row needs a manual pick.
-        const exact = nameMatches.find(m=>(m.size||'').toLowerCase()===r.size.toLowerCase() && (m.grade||'').toLowerCase()===r.grade.toLowerCase());
-        if(exact){ mat = exact; } else { skippedAmbiguous++; ambiguousNames.push(r.name); continue; }
+        // Several variants share this name — pick the one whose Size/Grade line
+        // up with the sheet (allowing for spacing/case differences like "10ltr"
+        // vs "10 Liter"). If none line up, fall through below and create a new
+        // variant from what the sheet gives, instead of skipping the row.
+        mat = nameMatches.find(m=>normSG(m.size)===normSG(r.size) && normSG(m.grade)===normSG(r.grade))
+           || nameMatches.find(m=>tightSG(m.size)===tightSG(r.size) && tightSG(m.grade)===tightSG(r.grade))
+           || null;
       }
       if(!mat){
-        // No existing material by this name at all — create it, same as the manual
-        // "new material" path in the add-material form, then use it immediately.
+        // No existing material this row can confidently attach to — either the
+        // name is brand new, or it matches several variants but none share this
+        // Size/Grade. Either way, create it (same path the manual "new material"
+        // form uses) using the Size/Grade exactly as typed in the sheet, and use
+        // it immediately — a row is never dropped just because its Size/Grade
+        // text doesn't byte-for-byte match what's already on file.
         const category = r.category || 'Other';
         const categoryIsOther = !SO_MATERIAL_CATEGORIES.includes(category);
         const draft = { name: r.name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size: r.size, grade: r.grade, price:0, unit:'pcs', rack:'', trackNos:true };
         const created = await createMaterialFromDraft(draft);
-        if(created==='duplicate' || !created){ skippedAmbiguous++; ambiguousNames.push(r.name); continue; }
-        mat = created; createdNew++; newlyCreated.push(mat.name);
+        if(created==='duplicate'){
+          // An exact duplicate (name+type+size+grade) already exists — use it
+          // rather than skipping the row.
+          mat = DB.materials.find(m=>m.name.toLowerCase()===r.name.toLowerCase() && normSG(m.size)===normSG(r.size) && normSG(m.grade)===normSG(r.grade)) || nameMatches[0] || null;
+        } else {
+          mat = created; createdNew++; newlyCreated.push(mat.name);
+        }
       }
+      if(!mat) continue; // should not happen, but guards against a stray null
       if(product.materials.some(x=>x.materialId===mat.id)){ skippedDupOnProduct++; continue; }
       product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:r.qty, qtyFulfilled:0});
       added++;
     }
 
-    if(!added && !skippedDupOnProduct && !skippedAmbiguous && !skippedNoName && !skippedNoQty){
+    if(!added && !skippedDupOnProduct && !skippedNoName && !skippedNoQty){
       toast('No material rows found in that file', true); fileInputEl.value=''; return;
     }
 
@@ -449,7 +470,6 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
         <div><b>${added}</b> material line${added===1?'':'s'} added to "${product.name}"</div>
         ${createdNew?`<div>${createdNew} new material${createdNew===1?'':'s'} created in the master list: ${newlyCreated.join(', ')}</div>`:''}
         ${skippedDupOnProduct?`<div>${skippedDupOnProduct} row${skippedDupOnProduct===1?'':'s'} skipped — already listed on this product</div>`:''}
-        ${skippedAmbiguous?`<div class="status-low">${skippedAmbiguous} row${skippedAmbiguous===1?'':'s'} skipped — name matches several variants already in the system and Size/Grade didn't pin one down: ${ambiguousNames.join(', ')}. Add these manually and pick the exact one.</div>`:''}
         ${skippedNoName?`<div>${skippedNoName} row${skippedNoName===1?'':'s'} skipped — no material name</div>`:''}
         ${skippedNoQty?`<div>${skippedNoQty} row${skippedNoQty===1?'':'s'} skipped — no valid Qty Needed</div>`:''}
       </div>
