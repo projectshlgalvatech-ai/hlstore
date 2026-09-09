@@ -195,6 +195,10 @@ function renderSO1(el){ renderSOCommon(el, true); }
 function renderSO2(el){ renderSOCommon(el, false); }
 function renderSO3(el){ renderSOCommon(el, false); }
 
+// Formats a quantity together with its unit (kg, Nos, mm, etc.) when the
+// requirement row has one, e.g. fmtQty(100, r) -> "100 kg". Falls back to a
+// bare number when no unit was ever recorded for that row.
+function fmtQty(qty, r){ return `${qty}${r && r.qtyUnit ? ' '+r.qtyUnit : ''}`; }
 function productBlockHTML(so, p, editable){
   const canEdit = editable && !so.locked && so.status!=='completed';
   const pOpen = !!soProductUIState[p.id];
@@ -214,8 +218,8 @@ function productBlockHTML(so, p, editable){
         const mat = materialById(r.materialId);
         const otherAvail = so.priority ? otherSOAvailable(so.id, r.materialId) : 0;
         const canPull = Math.min(remaining, otherAvail);
-        return `<tr><td>${r.materialName}</td><td>${mat && mat.size ? mat.size : '—'}</td><td>${mat && mat.grade ? mat.grade : '—'}</td><td>${r.qtyNeeded}</td><td>${r.qtyFulfilled}</td>
-        <td class="${remaining>0?'status-low':'status-ok'}">${remaining}</td>
+        return `<tr><td>${r.materialName}</td><td>${mat && mat.size ? mat.size : '—'}</td><td>${mat && mat.grade ? mat.grade : '—'}</td><td>${fmtQty(r.qtyNeeded, r)}</td><td>${fmtQty(r.qtyFulfilled, r)}</td>
+        <td class="${remaining>0?'status-low':'status-ok'}">${fmtQty(remaining, r)}</td>
         ${editable? `<td>${canApply>0? `<button class="btn small secondary" onclick="useExcess('${so.id}','${p.id}','${r.materialId}', ${canApply})">Apply excess (${canApply})</button>` : ''}
         ${canPull>0? `<button class="btn small secondary" onclick="pullFromOtherSO('${so.id}','${p.id}','${r.materialId}', ${canPull})" title="Reassign already-received stock from a non-priority SO to this priority SO">Pull from other SO (${canPull})</button>` : ''}
         <button class="btn small secondary" onclick="editMaterialModal('${r.materialId}')" title="Fix a mistake in this material's name, size, grade, etc. — works even after the SO is saved">Edit</button>
@@ -224,7 +228,8 @@ function productBlockHTML(so, p, editable){
     </tbody></table>` : `<div class="empty">No materials listed for this product yet.</div>`}
     ${canEdit? `<form class="row add-material-form" data-so="${so.id}" data-product="${p.id}" style="margin-top:8px">
       <div class="field" style="position:relative"><input required class="new-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist new-mat-list"></div><div class="hint new-mat-hint"></div></div>
-      <div class="field"><input required type="number" min="1" class="new-mat-qty" placeholder="Qty needed"></div>
+      <div class="field"><input required type="number" min="1" step="any" class="new-mat-qty" placeholder="Qty needed"></div>
+      <div class="field"><input class="new-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
       <div class="new-mat-fields" style="display:contents">
         ${sizePickerHTML('nm-size-'+p.id,'Size')}
         <div class="field"><input class="new-mat-grade" placeholder="Grade / Quality (optional)"></div>
@@ -260,7 +265,8 @@ function bulkAddMaterialFormHTML(so){
     </div>
     <form class="row bulk-material-form" data-so="${so.id}" style="margin-top:8px">
       <div class="field" style="position:relative"><input required class="bulk-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist bulk-mat-list"></div><div class="hint bulk-mat-hint"></div></div>
-      <div class="field"><input required type="number" min="1" class="bulk-mat-qty" placeholder="Qty needed (each)"></div>
+      <div class="field"><input required type="number" min="1" step="any" class="bulk-mat-qty" placeholder="Qty needed (each)"></div>
+      <div class="field"><input class="bulk-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
       <div class="bulk-mat-fields" style="display:contents">
         ${sizePickerHTML('bulk-size-'+so.id,'Size')}
         <div class="field"><input class="bulk-mat-grade" placeholder="Grade / Quality (optional)"></div>
@@ -298,12 +304,13 @@ function soEditFormHTML(so){
     ${so.products.map(p=>`
       <div style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px">
         <div class="field"><label>Product name</label><input id="soedit-pname-${so.id}-${p.id}" value="${p.name}"></div>
-        ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Qty needed</th></tr></thead><tbody>
-          ${p.materials.map(r=>`<tr><td>${r.materialName}</td><td><input type="number" min="1" step="any" id="soedit-qty-${so.id}-${p.id}-${r.id}" value="${r.qtyNeeded}" style="width:100px"></td></tr>`).join('')}
+        ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Qty needed</th><th>Unit</th></tr></thead><tbody>
+          ${p.materials.map(r=>`<tr><td>${r.materialName}</td><td><input type="number" min="1" step="any" id="soedit-qty-${so.id}-${p.id}-${r.id}" value="${r.qtyNeeded}" style="width:100px"></td><td><input type="text" id="soedit-unit-${so.id}-${p.id}-${r.id}" value="${r.qtyUnit||''}" placeholder="kg, Nos, mm..." style="width:110px"></td></tr>`).join('')}
         </tbody></table>` : `<div class="empty">No materials listed for this product yet.</div>`}
         ${canAddHere? `<form class="row add-material-form" data-so="${so.id}" data-product="${p.id}" style="margin-top:8px">
           <div class="field" style="position:relative"><input required class="new-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist new-mat-list"></div><div class="hint new-mat-hint"></div></div>
-          <div class="field"><input required type="number" min="1" class="new-mat-qty" placeholder="Qty needed"></div>
+          <div class="field"><input required type="number" min="1" step="any" class="new-mat-qty" placeholder="Qty needed"></div>
+          <div class="field"><input class="new-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
           <div class="new-mat-fields" style="display:contents">
             ${sizePickerHTML('nm-size-'+p.id,'Size')}
             <div class="field"><input class="new-mat-grade" placeholder="Grade / Quality (optional)"></div>
@@ -354,7 +361,9 @@ async function saveSOEdit(soId){
       const qtyEl = document.getElementById('soedit-qty-'+soId+'-'+p.id+'-'+r.id);
       const qty = Number(qtyEl.value);
       if(!qty || qty<=0){ toast(`Enter a valid quantity for ${r.materialName}`, true); return; }
-      matDrafts.push({r, qty});
+      const unitEl = document.getElementById('soedit-unit-'+soId+'-'+p.id+'-'+r.id);
+      const unit = (unitEl && unitEl.value || '').trim();
+      matDrafts.push({r, qty, unit});
     }
     productDrafts.push({p, pname, matDrafts});
   }
@@ -367,7 +376,7 @@ async function saveSOEdit(soId){
   so.date = newDate;
   productDrafts.forEach(({p, pname, matDrafts})=>{
     p.name = pname;
-    matDrafts.forEach(({r, qty})=>{ r.qtyNeeded = qty; });
+    matDrafts.forEach(({r, qty, unit})=>{ r.qtyNeeded = qty; r.qtyUnit = unit; });
   });
   checkSOCompletion(so);
   await saveKey('soList');
@@ -556,6 +565,7 @@ function paintSOList(editable){
         const pid = f.dataset.product;
         const nameInput = f.querySelector('.new-mat-name');
         const qtyInput = f.querySelector('.new-mat-qty');
+        const unitVal = (f.querySelector('.new-mat-unit')?.value||'').trim();
         let mat = pickedByInput.get(nameInput);
         if(!mat){
           const matches = DB.materials.filter(m=>m.name.toLowerCase()===nameInput.value.trim().toLowerCase());
@@ -578,7 +588,7 @@ function paintSOList(editable){
             const otherVal = (document.getElementById('nm-cat-other-'+pid)?.value||'').trim();
             if(otherVal) category = otherVal;
           }
-          const draft = { name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size, grade, price:0, unit:'pcs', rack:'', trackNos:true };
+          const draft = { name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size, grade, price:0, unit: unitVal || 'pcs', rack:'', trackNos:true };
           const created = await createMaterialFromDraft(draft);
           if(created==='duplicate'){ toast(`That exact material "${name}" already exists — pick it from the list instead.`, true); return; }
           if(!created){ toast(`Could not create "${name}" — pick an existing material from the list, or fill in a Category.`, true); return; }
@@ -586,7 +596,7 @@ function paintSOList(editable){
           toast(`New material variant "${mat.name}"${size?' ('+size+')':''} created`, false);
         }
         if(product.materials.some(r=>r.materialId===mat.id)){ toast(`${mat.name} is already listed for this product — remove it first to change the quantity`, true); return; }
-        product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyFulfilled:0});
+        product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyUnit:unitVal, qtyFulfilled:0});
         checkSOCompletion(so);
         await saveKey('soList'); await saveKey('materials'); toast(`${mat.name} added to ${product.name}`); render();
       });
@@ -601,6 +611,7 @@ function paintSOList(editable){
         if(!checkedIds.length){ toast('Select at least one product to add this material to', true); return; }
         const nameInput = f.querySelector('.bulk-mat-name');
         const qtyInput = f.querySelector('.bulk-mat-qty');
+        const unitVal = (f.querySelector('.bulk-mat-unit')?.value||'').trim();
         const qty = Number(qtyInput.value);
         if(!qty || qty<=0){ toast('Enter a quantity needed', true); return; }
         let mat = pickedByInput.get(nameInput);
@@ -623,7 +634,7 @@ function paintSOList(editable){
             const otherVal = (document.getElementById('bulk-cat-other-'+soId)?.value||'').trim();
             if(otherVal) category = otherVal;
           }
-          const draft = { name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size, grade, price:0, unit:'pcs', rack:'', trackNos:true };
+          const draft = { name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size, grade, price:0, unit: unitVal || 'pcs', rack:'', trackNos:true };
           const created = await createMaterialFromDraft(draft);
           if(created==='duplicate'){ toast(`That exact material "${name}" already exists — pick it from the list instead.`, true); return; }
           if(!created){ toast(`Could not create "${name}" — pick an existing material from the list, or fill in a Category.`, true); return; }
@@ -633,7 +644,7 @@ function paintSOList(editable){
         checkedIds.forEach(pid=>{
           const product = so.products.find(p=>p.id===pid); if(!product) return;
           if(product.materials.some(r=>r.materialId===mat.id)){ skipped.push(product.name); return; }
-          product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyFulfilled:0});
+          product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:qty, qtyUnit:unitVal, qtyFulfilled:0});
           addedCount++;
         });
         checkSOCompletion(so);
@@ -697,7 +708,7 @@ function soCompletionSummaryRows(so){
       rows.push({
         product: p.name, material: r.materialName,
         size: mat && mat.size ? mat.size : '—', grade: mat && mat.grade ? mat.grade : '—',
-        needed: r.qtyNeeded, received: r.qtyFulfilled, remaining
+        needed: fmtQty(r.qtyNeeded, r), received: fmtQty(r.qtyFulfilled, r), remaining: fmtQty(remaining, r)
       });
     });
   });

@@ -34,6 +34,17 @@ function extractLeadingNumber(text){
   const m = String(text==null?'':text).match(/-?\d+(\.\d+)?/);
   return m ? Number(m[0]) : NaN;
 }
+// Like extractLeadingNumber, but also keeps whatever unit text follows the number
+// instead of discarding it — "100kg" -> {qty:100, unit:'kg'}, "10 Nos" ->
+// {qty:10, unit:'Nos'}, "25 mm" -> {qty:25, unit:'mm'}, "10" -> {qty:10, unit:''}.
+function parseQtyAndUnit(text){
+  const s = String(text==null?'':text).trim();
+  const m = s.match(/-?\d+(\.\d+)?/);
+  if(!m) return {qty:NaN, unit:''};
+  const qty = Number(m[0]);
+  const unit = s.slice(m.index+m[0].length).trim();
+  return {qty, unit};
+}
 function inferMaterialTypeFromText(text){
   const t = (text||'').toLowerCase();
   if(/\bss\b|stainless/.test(t)) return 'SS';
@@ -331,6 +342,7 @@ window.bulkUpdateMaterialSizeGradeFromExcel = bulkUpdateMaterialSizeGradeFromExc
 const SO_MATERIAL_IMPORT_FIELD_ALIASES = {
   name: ['material name','name','material'],
   qty: ['qty needed','qty','quantity','quantity needed','needed'],
+  unit: ['unit','uom','unit of measure','units'],
   size: ['size','size/dimension','size / dimension','dimension'],
   grade: ['grade','grade / quality','grade/quality','quality'],
   category: ['category','material category']
@@ -351,13 +363,15 @@ async function downloadSOMaterialImportTemplate(){
     ["4. If the material already exists in the system, its name alone is enough — leave Size/Grade/Category blank."],
     ['5. If the material is new, fill in Size / Grade / Category if you have them — it will be created automatically and attached to the product in the same step. Leave them blank and it will still be created with sensible defaults.'],
     ['6. Category should be one of MS, SS, Plastic, Rubber, or Other — leave blank to default to Other.'],
-    ['7. Save the file, then in the app open the product under its SO and use "Upload Excel file" next to "+ Add material".']
+    ['7. Units (kg, Nos, mm, ltr, etc.) are kept and shown in the app. You can either type the unit right into "Qty Needed" (e.g. "100 kg") or put the number alone in "Qty Needed" and the unit in the separate "Unit" column — both work.'],
+    ['8. Save the file, then in the app open the product under its SO and use "Upload Excel file" next to "+ Add material".']
   ].forEach(r=>instr.addRow(r));
   instr.getCell('A1').font = {bold:true, size:14};
   const mat = wb.addWorksheet('Materials');
-  const headers = ['Material Name','Qty Needed','Size','Grade','Category'];
+  const headers = ['Material Name','Qty Needed','Unit','Size','Grade','Category'];
   mat.addRow(headers).font = {bold:true};
-  mat.addRow(['MS HR Sheet', 10, '4 x 1500 x 3000 mm','IS 2062 E250','MS']);
+  mat.addRow(['MS HR Sheet', 10, 'Nos', '4 x 1500 x 3000 mm','IS 2062 E250','MS']);
+  mat.addRow(['Zinc Powder', '100 kg', '', '', '', 'Other']);
   mat.columns.forEach(c=>c.width=22);
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
@@ -404,9 +418,16 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
     const rows = [];
     sheet.eachRow({includeEmpty:false}, (row, rowNumber)=>{
       if(rowNumber===1) return; // header
+      // The Qty Needed cell may carry its own unit ("100 kg", "10 Nos") — parse
+      // both out instead of discarding the unit. A separate "Unit" column, if
+      // present, wins over whatever (if anything) followed the number in the
+      // Qty cell, so either layout works.
+      const parsedQty = parseQtyAndUnit(cellText(row, colOf.qty));
+      const explicitUnit = cellText(row, colOf.unit);
       rows.push({
         name: cellText(row, colOf.name),
-        qty: extractLeadingNumber(cellText(row, colOf.qty)),
+        qty: parsedQty.qty,
+        unit: explicitUnit || parsedQty.unit,
         size: cellText(row, colOf.size),
         grade: cellText(row, colOf.grade),
         category: cellText(row, colOf.category)
@@ -449,7 +470,7 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
         // text doesn't byte-for-byte match what's already on file.
         const category = r.category || 'Other';
         const categoryIsOther = !SO_MATERIAL_CATEGORIES.includes(category);
-        const draft = { name: r.name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size: r.size, grade: r.grade, price:0, unit:'pcs', rack:'', trackNos:true };
+        const draft = { name: r.name, type: category, typeIsOther: categoryIsOther, category: DB.categories[0]||'General', size: r.size, grade: r.grade, price:0, unit: r.unit || 'pcs', rack:'', trackNos:true };
         const created = await createMaterialFromDraft(draft);
         if(created==='duplicate'){
           // An exact duplicate (name+type+size+grade) already exists — use it
@@ -461,7 +482,7 @@ async function bulkImportSOMaterialsFromExcel(fileInputEl, soId, productId){
       }
       if(!mat) continue; // should not happen, but guards against a stray null
       if(product.materials.some(x=>x.materialId===mat.id)){ skippedDupOnProduct++; continue; }
-      product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:r.qty, qtyFulfilled:0});
+      product.materials.push({id:uid(), materialId:mat.id, materialName:mat.name, qtyNeeded:r.qty, qtyUnit: r.unit||'', qtyFulfilled:0});
       added++;
     }
 
