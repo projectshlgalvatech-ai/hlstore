@@ -181,6 +181,136 @@ async function bulkImportMaterialsFromExcel(fileInputEl){
 }
 window.bulkImportMaterialsFromExcel = bulkImportMaterialsFromExcel;
 
+/* ---------------- Bulk attach Size / Grade to EXISTING materials from an uploaded
+   Excel file (Materials section, Device 1). Covers the case where a material was
+   created without knowing its size/grade yet, and that detail only turns up later
+   (e.g. from a supplier sheet) — instead of opening "Edit" on each material one by
+   one, fill one sheet and upload it once. Matching prefers Product Code (exact,
+   unambiguous even across same-name variants); falls back to Material Name only
+   when the name is unique across the material list. A name that matches more than
+   one existing material is left alone and reported as skipped, rather than guessing
+   which variant to update. Only cells that actually have a value in the sheet
+   overwrite the material's Size/Grade — a blank Size or Grade cell leaves that
+   field untouched, so a sheet that only fills in Grade doesn't erase Size. */
+const MATERIAL_SIZE_GRADE_FIELD_ALIASES = {
+  productCode: ['product code','code'],
+  name: ['material name','name','material'],
+  size: ['size','size/dimension','size / dimension','dimension','size (dimension)'],
+  grade: ['grade','grade / quality','grade/quality','quality']
+};
+async function downloadMaterialSizeGradeTemplate(){
+  if(typeof ExcelJS==='undefined'){ toast('Could not build template — check your internet connection', true); return; }
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'HL Galvatech'; wb.created = new Date();
+  const instr = wb.addWorksheet('Instructions');
+  instr.getColumn(1).width = 92;
+  [
+    ['HL Galvatech — Attach Size / Grade Template'],
+    [],
+    ['How to use this file:'],
+    ['1. Open the "Materials" tab — it is pre-filled with every material currently in the system, including ones already missing Size and/or Grade.'],
+    ['2. Fill in the Size and/or Grade columns wherever you now have that information. Leave a cell blank to leave that field unchanged.'],
+    ['3. Do not edit the Product Code or Material Name columns — they are what the system uses to find the right material. If Product Code is filled in, it is used; otherwise the Material Name is used (only works if that name is unique).'],
+    ['4. Save the file, then in the app go to Materials → Upload Excel file (Attach Size / Grade) → select this file.']
+  ].forEach(r=>instr.addRow(r));
+  instr.getCell('A1').font = {bold:true, size:14};
+  const mat = wb.addWorksheet('Materials');
+  const headers = ['Product Code','Material Name','Size','Grade'];
+  mat.addRow(headers).font = {bold:true};
+  DB.materials.forEach(m=>mat.addRow([m.productCode||'', m.name, m.size||'', m.grade||'']));
+  mat.columns.forEach(c=>c.width=22);
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'HL_Galvatech_Material_Size_Grade_Template.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+window.downloadMaterialSizeGradeTemplate = downloadMaterialSizeGradeTemplate;
+async function bulkUpdateMaterialSizeGradeFromExcel(fileInputEl){
+  const file = fileInputEl.files && fileInputEl.files[0];
+  if(!file) return;
+  if(typeof ExcelJS==='undefined'){ toast('Could not read file — ExcelJS did not load. Check your internet connection.', true); fileInputEl.value=''; return; }
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    let sheet = wb.worksheets.find(s=>normalizeHeaderText(s.name)==='materials')
+      || wb.worksheets.find(s=>normalizeHeaderText(s.name)!=='instructions')
+      || wb.worksheets[0];
+    if(!sheet){ toast('No sheet found in that file', true); fileInputEl.value=''; return; }
+
+    const headerRow = sheet.getRow(1);
+    const colOf = {};
+    headerRow.eachCell({includeEmpty:false}, (cell, colNumber)=>{
+      const h = normalizeHeaderText(cell.value);
+      for(const field in MATERIAL_SIZE_GRADE_FIELD_ALIASES){
+        if(colOf[field]) continue;
+        if(MATERIAL_SIZE_GRADE_FIELD_ALIASES[field].includes(h)) colOf[field] = colNumber;
+      }
+    });
+    if(!colOf.name && !colOf.productCode){ toast('Could not find a "Material Name" or "Product Code" column in that file', true); fileInputEl.value=''; return; }
+    const cellText = (row, col)=> col ? String(row.getCell(col).value==null?'':row.getCell(col).value).trim() : '';
+
+    const byCode = new Map(DB.materials.filter(m=>m.productCode).map(m=>[m.productCode.toLowerCase(), m]));
+    const nameCounts = new Map();
+    DB.materials.forEach(m=>{ const k=m.name.toLowerCase(); nameCounts.set(k, (nameCounts.get(k)||0)+1); });
+    const byUniqueName = new Map(DB.materials.filter(m=>nameCounts.get(m.name.toLowerCase())===1).map(m=>[m.name.toLowerCase(), m]));
+
+    let updated=0, skippedNoMatch=0, skippedAmbiguous=0, skippedNoChange=0, skippedNoKey=0;
+    const touched = new Set();
+
+    sheet.eachRow({includeEmpty:false}, (row, rowNumber)=>{
+      if(rowNumber===1) return; // header
+      const code = cellText(row, colOf.productCode);
+      const name = cellText(row, colOf.name);
+      const size = cellText(row, colOf.size);
+      const grade = cellText(row, colOf.grade);
+      if(!code && !name){ skippedNoKey++; return; }
+      if(!size && !grade){ return; } // nothing to update on this row, don't count as anything
+
+      let mat = null;
+      if(code){
+        mat = byCode.get(code.toLowerCase()) || null;
+        if(!mat){ skippedNoMatch++; return; }
+      } else {
+        const nameKey = name.toLowerCase();
+        if(nameCounts.get(nameKey)>1){ skippedAmbiguous++; return; }
+        mat = byUniqueName.get(nameKey) || null;
+        if(!mat){ skippedNoMatch++; return; }
+      }
+
+      let changed = false;
+      if(size && mat.size!==size){ mat.size = size; changed = true; }
+      if(grade && mat.grade!==grade){ mat.grade = grade; changed = true; }
+      if(changed){ updated++; touched.add(mat.id); } else { skippedNoChange++; }
+    });
+
+    if(!updated){
+      toast(skippedAmbiguous||skippedNoMatch ? 'No materials updated — see details' : 'No Size/Grade values found to update', true);
+    }
+    if(updated) await saveKey('materials');
+
+    fileInputEl.value = '';
+    showModal(`
+      <h3>Size / Grade update complete</h3>
+      <div class="row" style="flex-direction:column;gap:6px;margin:10px 0">
+        <div><b>${updated}</b> material${updated===1?'':'s'} updated</div>
+        ${skippedNoMatch?`<div class="status-low">${skippedNoMatch} row${skippedNoMatch===1?'':'s'} skipped — no matching material found</div>`:''}
+        ${skippedAmbiguous?`<div class="status-low">${skippedAmbiguous} row${skippedAmbiguous===1?'':'s'} skipped — name matches more than one material; add a Product Code to disambiguate</div>`:''}
+        ${skippedNoKey?`<div>${skippedNoKey} row${skippedNoKey===1?'':'s'} skipped — no Product Code or Material Name</div>`:''}
+      </div>
+      <div class="modal-actions"><button class="btn" type="button" onclick="closeModal()">Done</button></div>
+    `);
+    render();
+  }catch(e){
+    console.error('material size/grade update failed', e);
+    toast('Could not read that file — make sure it is a valid .xlsx file', true);
+    fileInputEl.value = '';
+  }
+}
+window.bulkUpdateMaterialSizeGradeFromExcel = bulkUpdateMaterialSizeGradeFromExcel;
+
 /* ---------------- Bulk import MULTIPLE materials into one SO/Projects product from an
    uploaded Excel file (Device 1). Same idea as the Materials-section import above, just
    aimed at a single product's material list: instead of submitting the "+ Add material"

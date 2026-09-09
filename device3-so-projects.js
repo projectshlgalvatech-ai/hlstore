@@ -88,6 +88,13 @@ function soStatusBadge(s){ return s.status==='completed' ? '<span class="status-
 // way. Kept outside DB so it resets on reload but survives the 4s auto-refresh poll.
 let soScopeState = { scope:'all', customDate:null, customMonth:null, customYear:null, calendarOpen:false };
 let soListUIState = { openGroups:{}, openItems:{} };
+// Per-product collapse state within an open SO — same collapsed-by-default,
+// click-to-expand pattern as the SO group/item levels above, just one level
+// deeper. Keyed by product id (unique via uid()), so it's safe to share one
+// flat object across every SO's products. Runtime-only, like the others.
+let soProductUIState = {};
+function toggleSOProduct(pid){ soProductUIState[pid] = !soProductUIState[pid]; render(); }
+window.toggleSOProduct = toggleSOProduct;
 function scopeSOList(rows){
   const scope = soScopeState.scope;
   const now = new Date();
@@ -190,11 +197,15 @@ function renderSO3(el){ renderSOCommon(el, false); }
 
 function productBlockHTML(so, p, editable){
   const canEdit = editable && !so.locked && so.status!=='completed';
+  const pOpen = !!soProductUIState[p.id];
   return `
-  <div style="border:1px solid var(--line);border-radius:3px;padding:10px 12px;margin:10px 0;background:var(--bg-sunk)">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <b>${p.name}</b> ${p.status==='completed'?'<span class="status-ok">Completed</span>':'<span class="status-low">Open</span>'}
-    </div>
+  <div style="border:1px solid var(--line);border-radius:3px;margin:10px 0;background:var(--bg-sunk)">
+    <button type="button" class="ent-item-toggle" style="padding:9px 10px" onclick="toggleSOProduct('${p.id}')">
+      <span class="chev">${pOpen?'▾':'▸'}</span>
+      <span class="name"><b>${p.name}</b> ${p.status==='completed'?'<span class="status-ok">Completed</span>':'<span class="status-low">Open</span>'}</span>
+      <span class="ent-item-date">${p.materials.length} material${p.materials.length===1?'':'s'}</span>
+    </button>
+    <div style="display:${pOpen?'block':'none'};padding:0 12px 10px 12px">
     ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Size</th><th>Grade</th><th>Needed</th><th>Received</th><th>Remaining</th>${editable?'<th></th>':''}</tr></thead><tbody>
       ${p.materials.map(r=>{
         const remaining = Math.max(0, r.qtyNeeded-r.qtyFulfilled);
@@ -230,6 +241,7 @@ function productBlockHTML(so, p, editable){
       <button type="button" class="btn small secondary" onclick="document.getElementById('so-mat-import-${so.id}-${p.id}').click()">Upload Excel file</button>
     </div>` : (editable && so.status==='completed' ? `<div class="hint">SO marked Complete by Device 3 — no new material can be added. Device 3 must mark it Incomplete first.</div>`
       : (editable && so.locked ? `<div class="hint">SO saved — hit Edit above to add more materials.</div>` : ''))}
+    </div>
   </div>`;
 }
 // "Add material to multiple products" — lets Device 1 add one material (existing or
@@ -272,6 +284,11 @@ function bulkAddMaterialFormHTML(so){
 // in place, then choose to save or keep editing via a confirm prompt.
 const soEditing = new Set();
 function soEditFormHTML(so){
+  // Whether new products/materials can be attached while this SO is open in
+  // "Edit details" mode — same gating as the normal (non-edit-details) view:
+  // blocked once the SO is Saved (locked) or marked Complete, unlocked via the
+  // Save/Edit toggle or Mark Incomplete same as everywhere else.
+  const canAddHere = !so.locked && so.status!=='completed';
   return `
   <div style="border:1px solid var(--line);border-radius:3px;padding:10px 12px;margin:10px 0;background:var(--bg-sunk)">
     <div class="row">
@@ -284,7 +301,25 @@ function soEditFormHTML(so){
         ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Qty needed</th></tr></thead><tbody>
           ${p.materials.map(r=>`<tr><td>${r.materialName}</td><td><input type="number" min="1" step="any" id="soedit-qty-${so.id}-${p.id}-${r.id}" value="${r.qtyNeeded}" style="width:100px"></td></tr>`).join('')}
         </tbody></table>` : `<div class="empty">No materials listed for this product yet.</div>`}
+        ${canAddHere? `<form class="row add-material-form" data-so="${so.id}" data-product="${p.id}" style="margin-top:8px">
+          <div class="field" style="position:relative"><input required class="new-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist new-mat-list"></div><div class="hint new-mat-hint"></div></div>
+          <div class="field"><input required type="number" min="1" class="new-mat-qty" placeholder="Qty needed"></div>
+          <div class="new-mat-fields" style="display:contents">
+            ${sizePickerHTML('nm-size-'+p.id,'Size')}
+            <div class="field"><input class="new-mat-grade" placeholder="Grade / Quality (optional)"></div>
+            <div class="field"><label style="display:block">Category</label>${soCategorySelectHTML('nm-cat-'+p.id)}</div>
+            <div class="field new-mat-cat-other-wrap" id="nm-cat-other-wrap-${p.id}" style="display:none"><input id="nm-cat-other-${p.id}" class="new-mat-cat-other" placeholder="Specify category"></div>
+          </div>
+          <div class="field existing-mat-summary" style="display:none;flex:1 1 100%"></div>
+          <button class="btn small secondary" type="submit">+ Add material</button>
+        </form>` : ''}
       </div>`).join('')}
+    ${canAddHere? `<div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+      <form class="row add-product-form" data-so="${so.id}">
+        <div class="field"><input required placeholder="Product name, e.g. Pen" class="new-product-name"></div>
+        <button class="btn small secondary" type="submit">+ Add product</button>
+      </form>
+    </div>` : ''}
     <div class="row" style="margin-top:10px">
       <button type="button" class="btn small" onclick="saveSOEdit('${so.id}')">Save</button>
       <button type="button" class="btn small secondary" onclick="cancelSOEdit('${so.id}')">Cancel</button>
@@ -374,6 +409,10 @@ function paintSOList(editable){
                     <span class="ent-item-date">created ${so.date}${so.completedDate? ' · completed '+so.completedDate:''}</span>
                   </button>
                   <div class="ent-item-body" style="display:${iOpen?'block':'none'}">
+                    ${so.status==='completed'? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                      <button type="button" class="btn small secondary" onclick="printSOSlip('${so.id}')">View / Print</button>
+                      <button type="button" class="btn small secondary" onclick="downloadSOExcel('${so.id}')">Download Excel</button>
+                    </div>` : ''}
                     ${(editable || DEVICE===3) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
                       ${editable && !soEditing.has(so.id)? `
                         <button type="button" class="btn small secondary" onclick="toggleSOPriority('${so.id}')">${so.priority? 'Un-prioritise' : 'Set Priority'}</button>
@@ -643,6 +682,94 @@ async function toggleSOManualStatus(soId){
 window.toggleSOLock = toggleSOLock;
 window.toggleSOPriority = toggleSOPriority;
 window.toggleSOManualStatus = toggleSOManualStatus;
+
+/* ---------------- Completed SO — view/print and Excel download ----------------
+   Same "open a printable window" pattern as the gate/issue/site slips elsewhere
+   in the app, plus a matching .xlsx export using the ExcelJS library already
+   loaded for the other Excel features. Available once an SO is Completed. */
+function soCompletionSummaryRows(so){
+  const rows = [];
+  so.products.forEach(p=>{
+    if(!p.materials.length){ rows.push({product:p.name, material:'—', size:'—', grade:'—', needed:'—', received:'—', remaining:'—'}); return; }
+    p.materials.forEach(r=>{
+      const mat = materialById(r.materialId);
+      const remaining = Math.max(0, r.qtyNeeded-r.qtyFulfilled);
+      rows.push({
+        product: p.name, material: r.materialName,
+        size: mat && mat.size ? mat.size : '—', grade: mat && mat.grade ? mat.grade : '—',
+        needed: r.qtyNeeded, received: r.qtyFulfilled, remaining
+      });
+    });
+  });
+  return rows;
+}
+function soPrintViewHTML(so){
+  const rows = soCompletionSummaryRows(so);
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>SO ${so.soNumber} — Summary</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;padding:28px;color:#1c262d;}
+  h1{font-size:19px;border-bottom:3px solid #4a6c8c;padding-bottom:10px;letter-spacing:.5px;}
+  h1 small{display:block;font-size:11px;letter-spacing:2px;color:#4d6a83;text-transform:uppercase;font-weight:normal;margin-top:4px;}
+  .meta{margin:14px 0;font-size:13px;}
+  .meta span{margin-right:24px;}
+  table{width:100%;border-collapse:collapse;margin-top:10px;}
+  td,th{border:1px solid #9fb4c4;padding:7px 9px;text-align:left;font-size:12.5px;}
+  th{background:#e3e8ea;}
+  @media print{ body{padding:10mm;} }
+</style></head><body>
+  <h1>HL GALVATECH<small>SO / Project Summary</small></h1>
+  <div class="meta">
+    <span><b>SO Number:</b> ${so.soNumber}</span>
+    <span><b>Created:</b> ${so.date}</span>
+    <span><b>Completed:</b> ${so.completedDate||'—'}</span>
+  </div>
+  <table>
+    <thead><tr><th>Product</th><th>Material</th><th>Size</th><th>Grade</th><th>Needed</th><th>Received</th><th>Remaining</th></tr></thead>
+    <tbody>
+      ${rows.map(r=>`<tr><td>${r.product}</td><td>${r.material}</td><td>${r.size}</td><td>${r.grade}</td><td>${r.needed}</td><td>${r.received}</td><td>${r.remaining}</td></tr>`).join('')}
+    </tbody>
+  </table>
+</body></html>`;
+}
+function printSOSlip(soId){
+  const so = findSO(soId); if(!so){ toast('SO not found', true); return; }
+  const html = soPrintViewHTML(so);
+  const w = window.open('', '_blank', 'width=900,height=900');
+  if(w){
+    w.document.write(html); w.document.close(); w.focus();
+    setTimeout(()=>{ try{ w.print(); }catch(e){} }, 300);
+  } else {
+    toast('Pop-up blocked — allow pop-ups to view/print', true);
+  }
+}
+window.printSOSlip = printSOSlip;
+async function downloadSOExcel(soId){
+  const so = findSO(soId); if(!so){ toast('SO not found', true); return; }
+  if(typeof ExcelJS==='undefined'){ toast('Could not build file — check your internet connection', true); return; }
+  const rows = soCompletionSummaryRows(so);
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'HL Galvatech'; wb.created = new Date();
+  const sheet = wb.addWorksheet('SO Summary');
+  sheet.mergeCells('A1:G1');
+  sheet.getCell('A1').value = `SO ${so.soNumber} — Summary`;
+  sheet.getCell('A1').font = {bold:true, size:14};
+  sheet.mergeCells('A2:G2');
+  sheet.getCell('A2').value = `Created: ${so.date}    Completed: ${so.completedDate||'—'}`;
+  sheet.addRow([]);
+  const headerRow = sheet.addRow(['Product','Material','Size','Grade','Qty Needed','Qty Received','Remaining']);
+  headerRow.font = {bold:true};
+  rows.forEach(r=>sheet.addRow([r.product, r.material, r.size, r.grade, r.needed, r.received, r.remaining]));
+  sheet.columns.forEach(c=>c.width=20);
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `SO_${so.soNumber.replace(/[^a-z0-9]/gi,'_')}_Summary.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
+}
+window.downloadSOExcel = downloadSOExcel;
+
 function renderExcessPoolTable(){
   const entries = Object.keys(DB.excessPool).filter(id=>DB.excessPool[id]>0);
   if(!entries.length) return `<div class="empty">No excess stock currently banked.</div>`;

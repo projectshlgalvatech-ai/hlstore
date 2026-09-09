@@ -1071,6 +1071,13 @@ function renderMaterials1(el){
       <button type="button" class="btn secondary" onclick="document.getElementById('mat-import-file').click()">Upload Excel file</button>
       <button type="button" class="btn secondary" onclick="downloadMaterialImportTemplate()">Download template</button>
     </div>
+    <div class="panel">
+      <h3>Attach Size / Grade from Excel</h3>
+      <div class="section-sub">For materials added without a Size or Grade at the time — download the template (pre-filled with every material on file), fill in Size/Grade wherever you now have it, and upload it back. Only the cells you fill in are applied; everything else is left as-is.</div>
+      <input type="file" id="mat-sizegrade-import-file" accept=".xlsx,.xls" style="display:none" onchange="bulkUpdateMaterialSizeGradeFromExcel(this)">
+      <button type="button" class="btn secondary" onclick="document.getElementById('mat-sizegrade-import-file').click()">Upload Excel file</button>
+      <button type="button" class="btn secondary" onclick="downloadMaterialSizeGradeTemplate()">Download template</button>
+    </div>
     ${collapsePanel('materials1-list', 'Material list', renderMaterialsListSearchBar() + renderMaterialsTable(materialsListSearch, true), `${DB.materials.length} material${DB.materials.length===1?'':'s'}`)}`;
 
   if(panelCollapseUIState['materials1-list']){
