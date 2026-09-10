@@ -199,6 +199,47 @@ function renderSO3(el){ renderSOCommon(el, false); }
 // requirement row has one, e.g. fmtQty(100, r) -> "100 kg". Falls back to a
 // bare number when no unit was ever recorded for that row.
 function fmtQty(qty, r){ return `${qty}${r && r.qtyUnit ? ' '+r.qtyUnit : ''}`; }
+// Unit picker for "Qty Needed" in SO/Projects. Reuses the same dropdown of
+// units as the Size picker (SIZE_UNITS: mm, kg, Nos, etc. + "Other" free
+// text) but wires it to the quantity instead of the size — Size in
+// SO/Projects is now a plain value with no unit of its own.
+function qtyUnitPickerHTML(prefix, selected){
+  const sel = String(selected||'').trim();
+  const inList = SIZE_UNITS.includes(sel);
+  const showOther = !!sel && !inList;
+  return `
+    <div class="field"><label>Unit</label><select id="${prefix}-unit">
+      <option value="" ${!sel?'selected':''}>—</option>
+      ${SIZE_UNITS.map(u=>`<option value="${u}" ${(sel===u || (showOther && u==='Other'))?'selected':''}>${u}</option>`).join('')}
+    </select></div>
+    <div class="field" id="${prefix}-other-wrap" style="display:${showOther?'flex':'none'}"><label>Unit — specify</label><input id="${prefix}-other-unit" placeholder="e.g. sq.ft" value="${showOther?m_escape(sel):''}"></div>`;
+}
+// Same picker as above but as two bare <td> cells, for the compact per-row
+// editing table (soEditFormHTML) instead of the flex "field" form layout.
+function qtyUnitPickerCellsHTML(prefix, selected){
+  const sel = String(selected||'').trim();
+  const inList = SIZE_UNITS.includes(sel);
+  const showOther = !!sel && !inList;
+  return `
+    <td><select id="${prefix}-unit" style="width:90px">
+      <option value="" ${!sel?'selected':''}>—</option>
+      ${SIZE_UNITS.map(u=>`<option value="${u}" ${(sel===u || (showOther && u==='Other'))?'selected':''}>${u}</option>`).join('')}
+    </select></td>
+    <td id="${prefix}-other-wrap" style="display:${showOther?'table-cell':'none'}"><input id="${prefix}-other-unit" placeholder="specify" style="width:90px" value="${showOther?m_escape(sel):''}"></td>`;
+}
+function wireQtyUnitPicker(prefix){
+  const unitSel = document.getElementById(prefix+'-unit');
+  const otherWrap = document.getElementById(prefix+'-other-wrap');
+  if(!unitSel || !otherWrap) return;
+  const shownDisplay = otherWrap.tagName==='TD' ? 'table-cell' : 'flex';
+  unitSel.addEventListener('change', ()=>{ otherWrap.style.display = unitSel.value==='Other' ? shownDisplay : 'none'; });
+}
+function readQtyUnitValue(prefix){
+  const unitSel = document.getElementById(prefix+'-unit');
+  let unit = unitSel ? unitSel.value : '';
+  if(unit==='Other'){ unit = (document.getElementById(prefix+'-other-unit')?.value||'').trim(); }
+  return unit || '';
+}
 function productBlockHTML(so, p, editable){
   const canEdit = editable && !so.locked && so.status!=='completed';
   const pOpen = !!soProductUIState[p.id];
@@ -229,9 +270,9 @@ function productBlockHTML(so, p, editable){
     ${canEdit? `<form class="row add-material-form" data-so="${so.id}" data-product="${p.id}" style="margin-top:8px">
       <div class="field" style="position:relative"><input required class="new-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist new-mat-list"></div><div class="hint new-mat-hint"></div></div>
       <div class="field"><input required type="number" min="1" step="any" class="new-mat-qty" placeholder="Qty needed"></div>
-      <div class="field"><input class="new-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
+      ${qtyUnitPickerHTML('nm-unit-'+p.id)}
       <div class="new-mat-fields" style="display:contents">
-        ${sizePickerHTML('nm-size-'+p.id,'Size')}
+        <div class="field"><input class="new-mat-size" placeholder="Size / Dimension (optional)"></div>
         <div class="field"><input class="new-mat-grade" placeholder="Grade / Quality (optional)"></div>
         <div class="field"><label style="display:block">Category</label>${soCategorySelectHTML('nm-cat-'+p.id)}</div>
         <div class="field new-mat-cat-other-wrap" id="nm-cat-other-wrap-${p.id}" style="display:none"><input id="nm-cat-other-${p.id}" class="new-mat-cat-other" placeholder="Specify category"></div>
@@ -266,9 +307,9 @@ function bulkAddMaterialFormHTML(so){
     <form class="row bulk-material-form" data-so="${so.id}" style="margin-top:8px">
       <div class="field" style="position:relative"><input required class="bulk-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist bulk-mat-list"></div><div class="hint bulk-mat-hint"></div></div>
       <div class="field"><input required type="number" min="1" step="any" class="bulk-mat-qty" placeholder="Qty needed (each)"></div>
-      <div class="field"><input class="bulk-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
+      ${qtyUnitPickerHTML('bulk-unit-'+so.id)}
       <div class="bulk-mat-fields" style="display:contents">
-        ${sizePickerHTML('bulk-size-'+so.id,'Size')}
+        <div class="field"><input class="bulk-mat-size" placeholder="Size / Dimension (optional)"></div>
         <div class="field"><input class="bulk-mat-grade" placeholder="Grade / Quality (optional)"></div>
         <div class="field"><label style="display:block">Category</label>${soCategorySelectHTML('bulk-cat-'+so.id)}</div>
         <div class="field bulk-mat-cat-other-wrap" id="bulk-cat-other-wrap-${so.id}" style="display:none"><input id="bulk-cat-other-${so.id}" class="bulk-mat-cat-other" placeholder="Specify category"></div>
@@ -304,15 +345,15 @@ function soEditFormHTML(so){
     ${so.products.map(p=>`
       <div style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px">
         <div class="field"><label>Product name</label><input id="soedit-pname-${so.id}-${p.id}" value="${p.name}"></div>
-        ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Qty needed</th><th>Unit</th></tr></thead><tbody>
-          ${p.materials.map(r=>`<tr><td>${r.materialName}</td><td><input type="number" min="1" step="any" id="soedit-qty-${so.id}-${p.id}-${r.id}" value="${r.qtyNeeded}" style="width:100px"></td><td><input type="text" id="soedit-unit-${so.id}-${p.id}-${r.id}" value="${r.qtyUnit||''}" placeholder="kg, Nos, mm..." style="width:110px"></td></tr>`).join('')}
+        ${p.materials.length? `<table style="margin-top:8px"><thead><tr><th>Material</th><th>Qty needed</th><th colspan="2">Unit</th></tr></thead><tbody>
+          ${p.materials.map(r=>`<tr><td>${r.materialName}</td><td><input type="number" min="1" step="any" id="soedit-qty-${so.id}-${p.id}-${r.id}" value="${r.qtyNeeded}" style="width:100px"></td>${qtyUnitPickerCellsHTML('soedit-unit-'+so.id+'-'+p.id+'-'+r.id, r.qtyUnit)}</tr>`).join('')}
         </tbody></table>` : `<div class="empty">No materials listed for this product yet.</div>`}
         ${canAddHere? `<form class="row add-material-form" data-so="${so.id}" data-product="${p.id}" style="margin-top:8px">
           <div class="field" style="position:relative"><input required class="new-mat-name" placeholder="Material name" autocomplete="off"><div class="autolist new-mat-list"></div><div class="hint new-mat-hint"></div></div>
           <div class="field"><input required type="number" min="1" step="any" class="new-mat-qty" placeholder="Qty needed"></div>
-          <div class="field"><input class="new-mat-unit" placeholder="Unit (kg, Nos, mm...)" style="width:130px"></div>
+          ${qtyUnitPickerHTML('nm-unit-'+p.id)}
           <div class="new-mat-fields" style="display:contents">
-            ${sizePickerHTML('nm-size-'+p.id,'Size')}
+            <div class="field"><input class="new-mat-size" placeholder="Size / Dimension (optional)"></div>
             <div class="field"><input class="new-mat-grade" placeholder="Grade / Quality (optional)"></div>
             <div class="field"><label style="display:block">Category</label>${soCategorySelectHTML('nm-cat-'+p.id)}</div>
             <div class="field new-mat-cat-other-wrap" id="nm-cat-other-wrap-${p.id}" style="display:none"><input id="nm-cat-other-${p.id}" class="new-mat-cat-other" placeholder="Specify category"></div>
@@ -361,8 +402,7 @@ async function saveSOEdit(soId){
       const qtyEl = document.getElementById('soedit-qty-'+soId+'-'+p.id+'-'+r.id);
       const qty = Number(qtyEl.value);
       if(!qty || qty<=0){ toast(`Enter a valid quantity for ${r.materialName}`, true); return; }
-      const unitEl = document.getElementById('soedit-unit-'+soId+'-'+p.id+'-'+r.id);
-      const unit = (unitEl && unitEl.value || '').trim();
+      const unit = readQtyUnitValue('soedit-unit-'+soId+'-'+p.id+'-'+r.id);
       matDrafts.push({r, qty, unit});
     }
     productDrafts.push({p, pname, matDrafts});
@@ -491,10 +531,16 @@ function paintSOList(editable){
   });
   wrap.querySelectorAll('.add-material-form').forEach(f=>{
     const pid = f.dataset.product;
-    wireSizePicker('nm-size-'+pid);
+    wireQtyUnitPicker('nm-unit-'+pid);
     const catSel = document.getElementById('nm-cat-'+pid);
     const catOtherWrap = document.getElementById('nm-cat-other-wrap-'+pid);
     if(catSel && catOtherWrap){ catSel.addEventListener('change', ()=>{ catOtherWrap.style.display = catSel.value==='Other' ? 'flex' : 'none'; }); }
+  });
+  // Per-row Unit dropdowns in the SO edit table (soEditFormHTML) — each existing
+  // material requirement gets its own picker, wired the same way as the "add
+  // material" ones above.
+  wrap.querySelectorAll('select[id^="soedit-unit-"]').forEach(sel=>{
+    wireQtyUnitPicker(sel.id.replace(/-unit$/,''));
   });
 
   // Bulk "add material to multiple products" form — same autocomplete/new-material-detection
@@ -517,7 +563,7 @@ function paintSOList(editable){
   };
   wrap.querySelectorAll('.bulk-material-form').forEach(f=>{
     const soId = f.dataset.so;
-    wireSizePicker('bulk-size-'+soId);
+    wireQtyUnitPicker('bulk-unit-'+soId);
     const catSel = document.getElementById('bulk-cat-'+soId);
     const catOtherWrap = document.getElementById('bulk-cat-other-wrap-'+soId);
     if(catSel && catOtherWrap){ catSel.addEventListener('change', ()=>{ catOtherWrap.style.display = catSel.value==='Other' ? 'flex' : 'none'; }); }
@@ -565,7 +611,7 @@ function paintSOList(editable){
         const pid = f.dataset.product;
         const nameInput = f.querySelector('.new-mat-name');
         const qtyInput = f.querySelector('.new-mat-qty');
-        const unitVal = (f.querySelector('.new-mat-unit')?.value||'').trim();
+        const unitVal = readQtyUnitValue('nm-unit-'+pid);
         let mat = pickedByInput.get(nameInput);
         if(!mat){
           const matches = DB.materials.filter(m=>m.name.toLowerCase()===nameInput.value.trim().toLowerCase());
@@ -579,7 +625,7 @@ function paintSOList(editable){
           // Size / Grade / Category fields on this form, instead of forcing a detour to Materials.
           const name = nameInput.value.trim();
           if(!name){ toast('Enter a material name', true); return; }
-          const size = readSizeValue('nm-size-'+pid);
+          const size = (f.querySelector('.new-mat-size')?.value||'').trim();
           const grade = (f.querySelector('.new-mat-grade').value||'').trim();
           const catSel = document.getElementById('nm-cat-'+pid);
           let category = catSel ? catSel.value : 'Other';
@@ -611,7 +657,7 @@ function paintSOList(editable){
         if(!checkedIds.length){ toast('Select at least one product to add this material to', true); return; }
         const nameInput = f.querySelector('.bulk-mat-name');
         const qtyInput = f.querySelector('.bulk-mat-qty');
-        const unitVal = (f.querySelector('.bulk-mat-unit')?.value||'').trim();
+        const unitVal = readQtyUnitValue('bulk-unit-'+soId);
         const qty = Number(qtyInput.value);
         if(!qty || qty<=0){ toast('Enter a quantity needed', true); return; }
         let mat = pickedByInput.get(nameInput);
@@ -625,7 +671,7 @@ function paintSOList(editable){
           // this form and use it immediately below. No detour to Materials, no re-typing it.
           const name = nameInput.value.trim();
           if(!name){ toast('Enter a material name', true); return; }
-          const size = readSizeValue('bulk-size-'+soId);
+          const size = (f.querySelector('.bulk-mat-size')?.value||'').trim();
           const grade = (f.querySelector('.bulk-mat-grade').value||'').trim();
           const catSel = document.getElementById('bulk-cat-'+soId);
           let category = catSel ? catSel.value : 'Other';
